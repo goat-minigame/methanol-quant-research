@@ -248,7 +248,8 @@ def persist_events(db,source,attempt_id,evidence,events,processed_at):
 
 def visible_events(db,as_of):
     cutoff=base.timestamp(as_of);latest={}
-    for r in db.execute('SELECT * FROM industry_event ORDER BY available_at,id'):
+    for r in sorted(db.execute('SELECT * FROM industry_event'),
+                    key=lambda row: (base.timestamp(row['available_at']), row['id'])):
         r=dict(r)
         if base.timestamp(r['available_at'])<=cutoff:
             latest[(r['source'],r['event_key'])]=r
@@ -256,6 +257,7 @@ def visible_events(db,as_of):
 
 
 def ingest(db_path,raw_dir,through,names=None,timeout=20):
+    base.validate_timeout(timeout)
     day=date.fromisoformat(through); names=names or [*CATALOG,'cctd','cctd_scpi']
     if any(n not in CATALOG and n not in ('cctd','cctd_scpi') for n in names):raise ValueError('unknown industry source')
     db=connect(db_path);results=[]
@@ -303,11 +305,7 @@ def status(db_path,as_of=None):
     now=as_of or base.utcnow();cutoff=base.timestamp(now);db=connect(db_path)
     try:
         events=visible_events(db,now)
-        facts={}
-        for r in db.execute('''SELECT o.*,v.available_at FROM observation o JOIN observation_availability v
-              ON v.observation_id=o.id ORDER BY o.id'''):
-            if r['available_at'] and base.timestamp(r['available_at'])<=cutoff:
-                facts[tuple(r[k] for k in ('source','metric','region','contract','unit','observed_start','observed_end'))]=dict(r)
+        facts = {base.series_key(r): r for r in base.latest_observations(db, now)}
         categories={k:{'current_numeric_fields':0,'missing_fields':0,'events':0} for k in ['inventory','mto','diplomacy','hormuz','coal','auction']}
         for r in facts.values():
             category=('inventory' if r['metric']=='port_inventory' else 'mto' if r['metric'] in

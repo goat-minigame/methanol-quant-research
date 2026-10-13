@@ -31,6 +31,8 @@ SOURCES = {
     'port_inventory': ('unavailable', 'unknown', None),
 }
 
+DEFAULT_SOURCES = tuple(SOURCES)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source (
  id TEXT PRIMARY KEY, confidence TEXT NOT NULL, lineage TEXT NOT NULL, url TEXT,
@@ -506,6 +508,8 @@ def error_category(exc):
         return 'proxy_connect_403'
     if isinstance(exc, HTTPError):
         return 'http_' + str(exc.code)
+    if 'timeout' in type(exc).__name__.lower():
+        return 'timeout'
     if 'proxyerror' in type(exc).__name__.lower():
         return 'proxy_error'
     reason = getattr(exc, 'reason', exc)
@@ -529,7 +533,13 @@ def response_error_category(code, headers, body):
     return 'http_' + str(code)
 
 
+def validate_timeout(timeout):
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError('timeout must be positive and finite')
+
+
 def acquire(url, raw_dir, timeout, method='GET'):
+    validate_timeout(timeout)
     evidence = {'started_at': utcnow(), 'url': url, 'method': method,
                 'headers': {'User-Agent': 'methanol-source-audit/1.0'}}
     evidence['request_hash'] = digest(canonical({k: evidence[k] for k in ('url', 'method', 'headers')}))
@@ -558,6 +568,7 @@ def acquire_akshare(day, raw_dir, timeout):
     Run serially: temporary requests interception is confined to this synchronous CLI.
     Use archived raw bytes for strict parsing, never AKShare's zero-filled frame.
     """
+    validate_timeout(timeout)
     fallback = SOURCES['akshare_czce'][2].format(year=day[:4], day=day.replace('-', ''))
     evidence = {'started_at': utcnow(), 'url': fallback, 'method': 'GET',
                 'request_hash': digest(canonical({'function': 'get_czce_daily', 'date': day}))}
@@ -613,6 +624,8 @@ def acquire_akshare(day, raw_dir, timeout):
 def persist(db, raw_dir, source, day, evidence, rows):
     # Every attempt retained; byte-identical observation versions are idempotent.
     evidence = dict(evidence)
+    if rows and (evidence.get('error_category') or evidence.get('http_status') != 200):
+        raise ValueError('cannot persist observations from failed response')
     evidence['source'] = source
     evidence['requested_date'] = day
     evidence['parsed_row_count'] = len(rows)
@@ -631,18 +644,21 @@ def persist(db, raw_dir, source, day, evidence, rows):
         attempt_id = cursor.lastrowid
         inserted = 0
         for row in rows:
-            # Raises before transaction commit on invalid data; never silently coerce NaN.
-            fingerprint = digest(canonical({'source': source, 'raw_hash': evidence['raw_hash'], **row}))
+            # Compare only the latest revision of this series, not any historical value.
+            # A -> B -> A must create a third version even when raw bytes repeat.
             values = [row[k] for k in ('metric', 'value', 'unit', 'region', 'contract', 'observed_start', 'observed_end', 'published_at')]
-            # Navigation/cookie changes are new raw evidence, not new observations.
-            # Keep old fingerprints intact and associate every repeated fetch.
-            existing = db.execute('''SELECT id FROM observation WHERE source=? AND metric=?
-                AND value IS ? AND unit=? AND region=? AND contract=? AND observed_start IS ?
-                AND observed_end IS ? AND published_at IS ? AND quality=? AND detail=?''',
-                [source, *values, row['quality'], canonical(row['detail']).decode()]).fetchone()
-            if existing:
-                db.execute('INSERT OR IGNORE INTO observation_evidence VALUES(?,?)', (existing['id'], attempt_id))
+            candidates = db.execute("""SELECT * FROM observation WHERE source=? AND metric=?
+                AND unit=? AND region=? AND contract=? AND observed_start IS ? AND observed_end IS ?
+                ORDER BY id DESC""", [source, *[row[k] for k in
+                    ('metric', 'unit', 'region', 'contract', 'observed_start', 'observed_end')]])
+            previous = next((r for r in candidates if series_key(dict(r)) == series_key(dict(row, source=source))), None)
+            same = previous and all(previous[k] == (canonical(v).decode() if k == 'detail' else v)
+                                    for k, v in row.items())
+            if same:
+                db.execute('INSERT OR IGNORE INTO observation_evidence VALUES(?,?)', (previous['id'], attempt_id))
                 continue
+            fingerprint = digest(canonical({'source': source, 'raw_hash': evidence['raw_hash'], **row,
+                                             'predecessor_id': previous['id'] if previous else None}))
             result = db.execute('''INSERT OR IGNORE INTO observation(source,metric,value,unit,region,contract,
                 observed_start,observed_end,published_at,ingested_at,raw_hash,quality,detail,fingerprint,attempt_id)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
@@ -658,10 +674,11 @@ def persist(db, raw_dir, source, day, evidence, rows):
 
 
 def ingest(db_path, raw_dir, days, names=None, timeout=20):
+    validate_timeout(timeout)
     days = sorted(set(date.fromisoformat(d).isoformat() for d in days))
     if not days:
         raise ValueError('at least one explicit trading date required')
-    names = names or list(SOURCES)
+    names = names or list(DEFAULT_SOURCES)
     if any(name not in SOURCES for name in names):
         raise ValueError('unknown source')
     results = []
@@ -712,43 +729,53 @@ def ingest(db_path, raw_dir, days, names=None, timeout=20):
             'errors': [r for r in results if r['status'] in ('failed', 'unavailable')], 'real_forecast_enabled': False}
 
 
+def series_key(row):
+    key = tuple(row[k] for k in ('source', 'metric', 'region', 'contract', 'unit', 'observed_start', 'observed_end'))
+    detail = json.loads(row['detail']) if isinstance(row['detail'], str) else row['detail']
+    return key + tuple(detail.get(k) for k in ('coal_type', 'calorific_value', 'tax_basis', 'price_basis'))
+
+
+def visible_observations(db, as_of):
+    cutoff = timestamp(as_of)
+    rows = [dict(r) for r in db.execute("""SELECT o.*,v.first_seen,v.processed_at,
+        v.available_at,v.availability_basis FROM observation o
+        JOIN observation_availability v ON v.observation_id=o.id""")
+        if r['available_at'] and timestamp(r['available_at']) <= cutoff]
+    return sorted(rows, key=lambda r: (timestamp(r['available_at']), r['id']))
+
+
+def latest_observations(db, as_of):
+    latest = {}
+    for row in visible_observations(db, as_of):
+        latest[series_key(row)] = row
+    return list(latest.values())
+
+
 def available_rows(db, as_of):
     cutoff = timestamp(as_of)
-    # Local point-in-time policy: never backfill newly fetched evidence into old runs.
     rows = []
-    for item in db.execute('''SELECT o.*,v.first_seen,v.processed_at,v.available_at,v.availability_basis
-            FROM observation o JOIN observation_availability v ON v.observation_id=o.id
-            WHERE o.value IS NOT NULL AND v.available_at IS NOT NULL'''):
-        row = dict(item)
+    # Choose the visible revision BEFORE quality filtering: a missing/quarantined
+    # correction must not resurrect an obsolete good value.
+    for row in latest_observations(db, as_of):
         official_first_seen = (row['source'] in ('czce', 'akshare_czce')
                                and row['quality'] == 'unknown_publication_time'
                                and row['metric'] in ('close', 'settle', 'volume', 'open_interest')
                                and row['contract'] == 'MA2701')
-        if row['quality'] != 'verified' and not official_first_seen:
+        if row['value'] is None or (row['quality'] != 'verified' and not official_first_seen):
             continue
         reference = row['published_at'] or row['first_seen']
         if (reference and row['observed_start'] and row['observed_end']
-                and timestamp(row['available_at']) <= cutoff
                 and date.fromisoformat(row['observed_start']) <= date.fromisoformat(row['observed_end'])
                 <= timestamp(reference).astimezone(ZoneInfo('Asia/Shanghai')).date()
                 <= cutoff.astimezone(ZoneInfo('Asia/Shanghai')).date()):
             rows.append(row)
-    # Retain only the latest visible revision for the same series/period/specification.
-    latest = {}
-    for row in sorted(rows, key=lambda r: (timestamp(r['available_at']), r['id'])):
-        key = tuple(row[k] for k in ('source', 'metric', 'region', 'contract', 'unit', 'observed_start', 'observed_end'))
-        detail = json.loads(row['detail'])
-        key += tuple(detail.get(k) for k in ('coal_type', 'calorific_value', 'tax_basis', 'price_basis'))
-        latest[key] = row
-    return list(latest.values())
+    return rows
 
 
 def cross_check(db, as_of):
     # Two CZCE transports are one source; third-party provenance is not proven independent.
-    rows = list(db.execute('''SELECT o.*,v.available_at FROM observation o
-        JOIN observation_availability v ON v.observation_id=o.id
-        WHERE contract='MA2701' AND metric IN ('close','settle','volume','open_interest')'''))
-    rows = [row for row in rows if row['available_at'] and timestamp(row['available_at']) <= timestamp(as_of)]
+    rows = [r for r in latest_observations(db, as_of) if r['contract'] == 'MA2701'
+            and r['metric'] in ('close', 'settle', 'volume', 'open_interest')]
     grouped = {}
     for row in rows:
         grouped.setdefault((row['observed_end'], row['metric']), {})[row['source']] = dict(row)
@@ -771,13 +798,13 @@ def status(db_path, as_of=None):
     db = connect(db_path)
     try:
         sources = []
+        visible = visible_observations(db, as_of)
         for source in db.execute('SELECT * FROM source ORDER BY id'):
             item = dict(source)
             attempts = [dict(r) for r in db.execute('SELECT * FROM ingest_attempt WHERE source=? ORDER BY id', (item['id'],))
                         if timestamp(r['ingested_at']) <= cutoff]
             item['latest_attempt'] = attempts[-1] if attempts else None
-            observations = [dict(r) for r in db.execute('SELECT * FROM observation WHERE source=?', (item['id'],))
-                            if timestamp(r['ingested_at']) <= cutoff]
+            observations = [r for r in visible if r['source'] == item['id']]
             item['observation_count'] = len(observations)
             item['latest_observed_end'] = max((r['observed_end'] for r in observations if r['observed_end']), default=None)
             item['latest_published_at'] = max((r['published_at'] for r in observations if r['published_at']), default=None)
