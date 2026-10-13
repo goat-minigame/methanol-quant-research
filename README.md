@@ -200,3 +200,18 @@ CCTD日评要求登录，停止该入口；Mysteel未取得合格产区动力煤
 `eligible_observations`兼容字段现与研究可用计数相同，不表示允许数值预测。
 
 六类最小接入见[六类在线验收](docs/industry-audit.md)。运行 `python -m methanol industry ingest --through 2026-10-13` 采集，`python -m methanol industry status` 查状态；支持 `--db`、采集 `--raw-dir`、`--sources`、每请求 `--timeout`（默认20秒）。新增28条数值记录与13条事件，第二次在线新增均0；部分来源受限返回1并存证，历史摘要及公告线索不自动成为预测输入。
+
+## Issue #2：MA 期权日终观察首版（部分 P0）
+
+基于已合并的 #1 存证工具，新增独立入口：
+
+```bash
+python -m methanol.options ingest --date 2026-10-13
+python -m methanol.options status
+python -m methanol.options report --output reports/options/observation.json
+```
+
+已实际取得两日期各 188 条 MA2611/MA2701 期权与 2 条对应期货，保留官方原码和证据。
+这是日终观察，不能实时预警；缺盘口、到期/乘数/费用规则和事件验证，始终输出“暂无合格信号”。
+不把 MA0 当标的，不把无成交零收盘当价格，不回填历史可知时间。
+详见 [数据口径、实采审计、缺项与恢复](docs/options-eod.md)。真实数据不公开分发。
