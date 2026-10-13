@@ -92,9 +92,41 @@ def main():
     releases.add_argument('--input',required=True)
     releases.add_argument('--as-of',required=True)
     releases.add_argument('--output')
+    sources = commands.add_parser('sources', help='真实来源采集、SQLite与时间质量审计；不生成预测')
+    source_cmd = sources.add_subparsers(dest='action', required=True)
+    for action in ('ingest', 'status'):
+        source_parser = source_cmd.add_parser(action)
+        source_parser.add_argument('--db', default='data/sources.sqlite3')
+        if action == 'ingest':
+            source_parser.add_argument('--dates', nargs='+', required=True)
+            source_parser.add_argument('--sources', nargs='+')
+            source_parser.add_argument('--raw-dir', default='data/source-evidence')
+            source_parser.add_argument('--timeout', type=float, default=20)
+        else:
+            source_parser.add_argument('--as-of')
+    industry = commands.add_parser('industry', help='六类产业事实与官方事件；不生成预测')
+    industry_cmd = industry.add_subparsers(dest='action', required=True)
+    for action in ('ingest', 'status'):
+        ip = industry_cmd.add_parser(action)
+        ip.add_argument('--db', default='data/sources.sqlite3')
+        if action == 'ingest':
+            ip.add_argument('--through', required=True)
+            ip.add_argument('--sources', nargs='+')
+            ip.add_argument('--raw-dir', default='data/source-evidence')
+            ip.add_argument('--timeout', type=float, default=20)
+        else:
+            ip.add_argument('--as-of')
     args = parser.parse_args()
     try:
-        if args.command == 'indicators':
+        if args.command == 'industry':
+            from .industry import ingest, status
+            result = (ingest(args.db,args.raw_dir,args.through,args.sources,args.timeout)
+                      if args.action == 'ingest' else status(args.db,args.as_of))
+        elif args.command == 'sources':
+            from .sources import ingest, status
+            result = (ingest(args.db, args.raw_dir, args.dates, args.sources, args.timeout)
+                      if args.action == 'ingest' else status(args.db, args.as_of))
+        elif args.command == 'indicators':
             result=indicator_report(args.input,args.output,args.csv_output)
         elif args.command == 'compare-strategies':
             result=compare(args.input,args.output,args.split_date,args.cost_bps)

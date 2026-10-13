@@ -15,7 +15,7 @@ python -m methanol backtest --fast 10 --slow 30 --cost-bps 5
 
 `fetch` 默认下载新浪财经甲醇主力连续 `MA0`，写入 `data/ma_daily.csv`。也可使用 `--symbol MA2701 --output data/ma2701.csv` 请求单合约（接口是否覆盖此合约需实际核验）。下载会覆盖指定输出文件及其来源记录；希望保留旧版本时请指定不同文件名。下载失败不会自动生成假行情。
 
-数据下载需要允许 HTTPS 域名 `stock2.finance.sina.com.cn`。郑商所官网 `www.czce.com.cn` 可用于核验合约规则及官方数据。若出现 `Tunnel connection failed: 403 Forbidden`，请在云环境设置审核、保存网络许可并在需要时发布环境，再重试。此工具尚未实现交易所数据下载适配器。
+数据下载需要允许 HTTPS 域名 `stock2.finance.sina.com.cn`。郑商所官网 `www.czce.com.cn` 可用于核验合约规则及官方数据。若出现 `Tunnel connection failed: 403 Forbidden`，请在云环境设置审核、保存网络许可并在需要时发布环境，再重试。Issue #1 新增交易所逐合约采集适配器，最新实测见文末。
 
 下载成功时同时保存原始 JSONP、抓取时间、请求地址、日期范围、行数，以及原始响应和 CSV 的 SHA-256。公共接口可能改变、缺失历史或停止服务；以实际返回的日期范围为准，不保证最新、不保证与交易所一致。数据仅供本地学习，未随代码提交或重新分发。
 
@@ -45,7 +45,7 @@ python -m methanol backtest --input /path/to/ma.csv --output reports/custom
 
 本版计算的是**无杠杆价格指数研究收益**，不是实际期货账户盈亏。主力连续可能有拼接跳空，无法代表可以直接交易的单一合约；本版不自动修正这些跳空，交易成本的基点假设也不等于真实收费。年化采用 252 个交易日，最大回撤只在区间端点计算，夏普使用零无风险利率。请勿将结果直接用于下单。
 
-## 当前验证状态
+## 早期验证记录（历史检查点）
 
 - 单元测试使用明确的**合成行情**，覆盖下一日执行、防止未来数据影响信号、进出成本、隔夜收益、平仓、回撤、格式校验、下载失败处理及报告生成。
 - 2026-10-13 已成功通过新浪公开接口下载并校验 **2,857 根真实 MA0 日线**，日期范围 **2014-12-24 至 2026-10-12**。已实际执行 `fetch → check → backtest` 并生成 HTML、CSV 和 JSON 报告。
@@ -72,7 +72,7 @@ python -m methanol research --split-date 2022-01-01 --fast 10 --slow 30 --cost-b
 
 **整段历史已经被查看过，因此这属于回顾性的时间划分评估，不能称为从未见过数据上的独立样本外成功。** 下一步应冻结研究假设，在新数据或预先保留的独立数据上验证，不能通过反复修改分界或参数来追求好看的结果。
 
-### 当前时间划分结果
+### 早期时间划分结果（历史检查点）
 
 使用同一份 2,857 根行情、固定 10/30 均线、单边 5 基点成本：
 
@@ -112,7 +112,7 @@ python -m methanol forecast
 
 同时展示平衡准确率、上涨预测精确率、概率 Brier 评分、扣除成本后的价格指数收益和回撤。类别单一时平衡准确率不适用，写为 null。相对基准的准确率差使用固定随机种子、20日移动块、500次重采样计算描述性95%区间；该方法不能修复重复查看历史、多次试验、数据错误或市场结构变化。
 
-### 本轮实测结论
+### 早期实测结论（历史检查点）
 
 固定默认参数，2022年起评估1,152次可验证预测：
 
@@ -156,3 +156,47 @@ python -m methanol fundamentals catalog
 ```
 
 查看 `reports/strategies/report.html`。全部57项测试通过。甲醇报价、上市期权列表、ma2701期权链和甲醇仓单已成功在线获取；新宏观与现货基差域名仍需网络许可，不能将未验证入口当成可用数据。新增策略不自动选优，也没有据此宣称预测准确率提高。
+
+## Issue #1：真实来源采集与质量闸门（2026-10-13 历史验收摘要）
+
+以下真实采集结果来自 2026-10-13 UTC 的先前验收，不代表读者运行时的当前行情。本次公开交付复跑离线测试，未重新联网采集。
+
+新增独立采集入口，不向旧指标/回测/预测模块注入数据：
+
+```bash
+# AKShare 路径可选依赖；其他采集与状态查询使用 Python 标准库
+python -m venv .venv
+.venv/bin/pip install -r requirements-options-lock.txt
+.venv/bin/python -m methanol sources ingest --dates 2026-10-09 2026-10-12
+python -m methanol sources status
+python -m unittest discover -s tests -v
+```
+
+`--db` 可指定 SQLite 文件，`ingest --raw-dir` 可指定原始证据目录；
+`--sources czce akshare_czce sina quhe cctd` 可限制采集范围。
+`status --as-of 2026-10-13T08:00:00+08:00` 限定可见时间。
+失败采集返回退出码 1，仍会输出 JSON 并保存失败证据；不会生成替代行情。
+
+交付验收记录为 **93 项离线测试通过**；发布复验见来源审计说明。郑商所及合法 AKShare 路径实际取得两个指定交易日的
+MA701，并按交易日规范化为 MA2701；新浪对应收盘、结算、成交、持仓均一致，但独立性未确认。
+曲合报告五项字段已解析，统计期未知；页面显示的分钟发布时间保留原文，时区未核实，
+`published_at` 仍为 null。CCTD 得到 502 点陕西综合煤价序列和三地产区坑口快照，
+**综合价不是坑口成本序列**。化销网公开现货及运费各35格（各28个数值、7个空值），
+周末/重复值标为可能沿用，不能认为每天都是新报价。
+
+原始抓取、修订和失败均保留于私人验收件。时间闸门已最小修正：仅缺公布时刻的官方行情从响应完成的first_seen起可用于未来研究，
+不回填历史可知时间；解析修订还须等到reprocessed_at。其余统计期或口径缺项仍隔离；
+HTTP 200、入库成功与预测可用是不同状态。曲合重试曾503，金十根域502；
+CCTD日评要求登录，停止该入口；Mysteel未取得合格产区动力煤坑口序列。
+旧 README 的 MA0/仓单成功记录是历史状态，不算本轮验收数据。
+
+详见 [来源审计与实现边界](docs/source-audit.md)。真实基本面价格预测保持关闭；
+两个行情日期加一份周报即使取得，也不构成可训练或校准的数据集。
+
+该次验收 `research_eligible_observations=16` 包括CZCE及同源AKShare两套字段，按官方主记录为2日8字段；
+并非16个独立训练样本。`published_at`保持null，新增`observation_availability`保存
+`first_seen`、`processed_at`、`available_at`及`availability_basis`。旧库迁移只读已校验哈希的
+请求证据，旧适配器`ingested_at`明确为响应读取完成后的时刻；无法确认完成时刻或修订时刻的记录不放行。
+`eligible_observations`兼容字段现与研究可用计数相同，不表示允许数值预测。
+
+六类最小接入见[六类在线验收](docs/industry-audit.md)。运行 `python -m methanol industry ingest --through 2026-10-13` 采集，`python -m methanol industry status` 查状态；支持 `--db`、采集 `--raw-dir`、`--sources`、每请求 `--timeout`（默认20秒）。新增28条数值记录与13条事件，第二次在线新增均0；部分来源受限返回1并存证，历史摘要及公告线索不自动成为预测输入。
