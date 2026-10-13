@@ -3,3 +3,15 @@ __pycache__/
 .venv/
 data/
 reports/
+
+# Local acquisition evidence and private acceptance artifacts
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.db
+*.response
+*.attempt.json
+.env
+.env.*
+private-acceptance/
