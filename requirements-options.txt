@@ -1,0 +1,2 @@
+# Optional market adapters; Python 3.10+. Core research still uses only stdlib.
+akshare==1.19.1

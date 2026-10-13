@@ -1,0 +1,24 @@
+{
+  "repository": "https://github.com/jangviktor-web/a-stock-data-quant",
+  "commit": "0944c726f19aa041ecf2d93ac7357223d061823d",
+  "license": "MIT",
+  "files": {
+    "futures.py": {
+      "upstream_path": "bin/cn/futures.py",
+      "sha256": "ebf5410400fb363e35fe014dd21128050efffe0a5c80252afa5cf65b34fcc61c"
+    },
+    "options.py": {
+      "upstream_path": "bin/cn/options.py",
+      "sha256": "ea37417869893bfcd20b87c8fc67a46ba8cf1a93412e674c617b0f18ea3fd2ba"
+    },
+    "LICENSE": {
+      "upstream_path": "LICENSE",
+      "sha256": "48e7e0926dac446d980b427601aa5b7a2d8b6a3163f48967732b69c129f3f4da"
+    },
+    "volatility.py": {
+      "upstream_path": "scripts/quant/volatility.py",
+      "sha256": "b9d5d52fd4a2afdaa9a30dbab0e29a95feea22d5b5d8b97c381b72dc8b37a0bb"
+    }
+  },
+  "integration": "Upstream source preserved unchanged. methanol/markets.py supplies HTTPS, explicit failure handling, settlement naming, expiry validation, snapshots, and MA commodity options extension. No upstream configuration or credentials imported."
+}

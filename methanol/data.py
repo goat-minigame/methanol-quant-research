@@ -70,8 +70,7 @@ def parse_response(raw):
 
 
 def read_csv(path):
-    with Path(path).open(encoding='utf-8-sig', newline='') as f:
-        return validate_bars(list(csv.DictReader(f)))
+    return inspect_dataset(path)[0]
 
 
 def fetch_data(output, symbol='MA0', timeout=30):
@@ -103,3 +102,48 @@ def fetch_data(output, symbol='MA0', timeout=30):
     }
     output.with_suffix('.metadata.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding='utf-8')
     return metadata
+
+
+def inspect_dataset(path):
+    """Verify local integrity, not the truth or independence of the market source."""
+    path = Path(path)
+    content = path.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    provenance = path.with_suffix('.metadata.json')
+    evidence = {'csv_sha256': digest, 'status': 'unverified', 'metadata': None}
+    if provenance.exists():
+        metadata = json.loads(provenance.read_text(encoding='utf-8'))
+        if not isinstance(metadata, dict) or metadata.get('csv_sha256') != digest:
+            raise ValueError('CSV 与来源记录哈希不一致；请核验或重新下载，不可使用旧来源记录')
+        raw_path = path.with_suffix('.raw.txt')
+        if not raw_path.exists():
+            raise ValueError('来源记录存在但原始响应缺失，无法完成完整性校验')
+        raw = raw_path.read_bytes()
+        if metadata.get('raw_sha256') != hashlib.sha256(raw).hexdigest():
+            raise ValueError('原始行情响应哈希不一致')
+        evidence.update(status='verified_local_hashes', metadata=metadata)
+    # Parse the exact bytes whose hash was computed.
+    import io
+    rows = validate_bars(list(csv.DictReader(io.StringIO(content.decode('utf-8-sig')))))
+    if evidence['metadata'] is not None:
+        meta = evidence['metadata']
+        if (meta.get('rows'), meta.get('first_date'), meta.get('last_date')) != (len(rows), rows[0]['date'], rows[-1]['date']):
+            raise ValueError('来源记录中的行数或日期范围与 CSV 不一致')
+    evidence['quality'] = quality_check(rows)
+    return rows, evidence
+
+
+def quality_check(rows):
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo('Asia/Shanghai')).date()
+    last = date.fromisoformat(rows[-1]['date'])
+    if last > today:
+        raise ValueError('行情包含未来日期，请核验数据')
+    gaps = [{'date': b['date'], 'previous_date': a['date'], 'gap_return': b['open']/a['close']-1}
+            for a, b in zip(rows, rows[1:]) if abs(b['open']/a['close']-1) >= .10]
+    return {'rows': len(rows), 'first_date': rows[0]['date'], 'last_date': rows[-1]['date'],
+            'age_calendar_days': (today-last).days, 'large_open_gaps': gaps,
+            'zero_volume_days': sum(b['volume'] == 0 for b in rows),
+            'missing_volume_days': sum(b['volume'] is None for b in rows),
+            'calendar_note': '距最后行情的自然日数不是缺失交易日数；未接入交易所日历。',
+            'verification_note': '哈希仅校验本地文件一致性，不证明行情正确；大跳空原因尚未核验。'}

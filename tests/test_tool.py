@@ -96,7 +96,12 @@ class StrategyTests(unittest.TestCase):
     def test_report_outputs_and_source_escaping(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d)/'synthetic.csv'
-            path.with_suffix('.metadata.json').write_text('<script>bad()</script>')
+            import io
+            raw = json.dumps(bars([10, 20, 30, 40])).encode()
+            with patch('methanol.data.urlopen', return_value=io.BytesIO(raw)):
+                metadata = fetch_data(path)
+            metadata['source'] = '<script>bad()</script>'
+            path.with_suffix('.metadata.json').write_text(json.dumps(metadata))
             output = Path(d)/'report'
             write_report(backtest(bars([10, 20, 30, 40]), 1, 2), output, path)
             self.assertEqual({p.name for p in output.iterdir()}, {'summary.json', 'curve.csv', 'trades.csv', 'report.html'})
